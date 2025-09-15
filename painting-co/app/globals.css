@@ -121,3 +121,39 @@ img{ display:block; max-width:100%; height:auto }
   .thumb-grid{ grid-template-columns: repeat(6,1fr); gap:10px; }
   .price{ font-size: 32px; }
 }
+
+  /* Dropzone */
+  .dropzone {
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+  .dropzone.over {
+    background: rgba(0, 120, 255, 0.05);
+}
+
+/* Thumb grid for uploaded previews */
+  .thumb-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+  .thumb {
+    width: 72px;
+    height: 72px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+}
+
+  .thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+  
