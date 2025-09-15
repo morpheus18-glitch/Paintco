@@ -1,10 +1,12 @@
 export default function EstimateResult({ data }:{
-  subtotal:number; total?:number; rangeLow:number; rangeHigh:number;
-  labor:number; materials:number; prep:number;
-  difficulty:'low'|'medium'|'high'; sqft:number; notes:string[];
-  crew?: { people:number; days:number; hoursTotal:number; productivitySqftHr:number; };
-  materialsDetail?: { gallons:number; unitCost:number; wastePct:number; };
-  lineItems?: { label:string; amount:number; }[];
+  data: {
+    subtotal:number; total?:number; rangeLow:number; rangeHigh:number;
+    labor:number; materials:number; prep:number;
+    difficulty:'low'|'medium'|'high'; sqft:number; notes:string[];
+    crew?: { people:number; days:number; hoursTotal:number; productivitySqftHr:number; };
+    materialsDetail?: { gallons:number; unitCost:number; wastePct:number; };
+    lineItems?: { label:string; amount:number; }[];
+  }
 }) {
   const fmt = (n:number)=> `$${n.toFixed(2)}`;
   return (
