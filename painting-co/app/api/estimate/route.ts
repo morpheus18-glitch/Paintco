@@ -16,30 +16,32 @@ function daysUntil(dateStr?: string | null) {
   return Math.ceil((target.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
 }
 
+async function buffersFromFormPhotos(fd: FormData): Promise<Buffer[]> {
+  const entries = fd.getAll('photos') as unknown as Blob[];
+  if (!entries || entries.length === 0) throw new Error('No photos uploaded');
+  const out: Buffer[] = [];
+  for (const b of entries) out.push(Buffer.from(await (b as Blob).arrayBuffer()));
+  return out;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const fd = await req.formData();
 
-    const blobs = fd.getAll('photos') as unknown as Blob[];
-    if (!blobs || blobs.length === 0) {
-      return NextResponse.json({ error: 'No photos uploaded' }, { status: 400 });
-    }
+    // 1) files only
+    const files = await buffersFromFormPhotos(fd);
 
-    // ✅ Defaults so the client can send ONLY photos
-    const heightFtRaw = fd.get('heightFt') ?? '9';
-    const coatsRaw = fd.get('coats') ?? '2';
-    const finishRaw = (fd.get('finish') as string) ?? 'eggshell';
-
+    // 2) defaults (client sends no fields)
     const parsed = EstimateInput.safeParse({
-      heightFt: heightFtRaw,
-      coats: coatsRaw,
-      finish: finishRaw
+      heightFt: fd.get('heightFt') ?? '9',          // default 9 ft
+      coats: fd.get('coats') ?? '2',                // default 2 coats
+      finish: (fd.get('finish') as string) ?? 'eggshell',
     });
     if (!parsed.success) {
       return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
     }
 
-    // Optional fields (unused in “no input” flow; safe defaults)
+    // Optional extras (ignored in “no input” flow; safe defaults)
     const distanceMiles = Number(fd.get('distanceMiles') || 0);
     const preferredDays = Number(fd.get('preferredDays') || 0) || undefined;
     const rushToggle = String(fd.get('rush') || '') === 'true';
@@ -51,17 +53,14 @@ export async function POST(req: NextRequest) {
     const deadlineRush =
       typeof daysLeft === 'number' ? (daysLeft <= 3 ? 0.30 : daysLeft <= 7 ? 0.20 : 0) : 0;
 
-    // Convert blobs to buffers
-    const buffers: Buffer[] = [];
-    for (const b of blobs) buffers.push(Buffer.from(await (b as Blob).arrayBuffer()));
-
+    // 3) estimate
     if (USE_PRO) {
-      const result = await estimatePro(buffers, {
+      const result = await estimatePro(files, {
         ...parsed.data,
         distanceMiles,
         preferredDays,
         rush: rushToggle || deadlineRush > 0,
-        weekend
+        weekend,
       });
 
       if (deadlineRush > 0) {
@@ -69,22 +68,27 @@ export async function POST(req: NextRequest) {
         result.rangeLow = +(result.rangeLow * mult).toFixed(2);
         result.rangeHigh = +(result.rangeHigh * mult).toFixed(2);
         (result as any).total = +(((result as any).total ?? result.subtotal) * mult).toFixed(2);
-        result.notes.push(`Deadline premium applied: +${Math.round(deadlineRush * 100)}% based on date needed.`);
+        result.notes.push(
+          `Deadline premium applied: +${Math.round(deadlineRush * 100)}% based on date needed.`
+        );
       }
 
       return NextResponse.json(result);
     } else {
-      const result = await heuristicV2(buffers, parsed.data);
+      const result = await heuristicV2(files, parsed.data);
       if (rushToggle || deadlineRush > 0) {
         const mult = 1 + (rushToggle ? 0.07 : 0) + deadlineRush;
         result.subtotal = +(result.subtotal * mult).toFixed(2);
         result.rangeLow = +(result.rangeLow * mult).toFixed(2);
         result.rangeHigh = +(result.rangeHigh * mult).toFixed(2);
-        result.notes.push(`Rush/deadline premium applied.`);
+        result.notes.push('Rush/deadline premium applied.');
       }
       return NextResponse.json(result);
     }
   } catch (e: any) {
-    return NextResponse.json({ error: e.message || 'Failed to estimate' }, { status: 500 });
+    return NextResponse.json(
+      { error: e?.message || 'Failed to estimate' },
+      { status: e?.message === 'No photos uploaded' ? 400 : 500 }
+    );
   }
 }
