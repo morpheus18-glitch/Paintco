@@ -9,6 +9,12 @@ export type CostInputs = {
   preferredDays?: number;
   rush?: boolean;
   weekend?: boolean;
+  __ctx?: {
+    interior: boolean;
+    trim: 'low'|'medium'|'high';
+    heightFt?: number | null;
+    drywall: 'none'|'light'|'moderate'|'heavy';
+  };
 };
 
 export type CostOutputs = {
@@ -77,8 +83,8 @@ export function planCrewAndHours(inputs: CostInputs) {
   } else {
     for (let p = CFG.minCrew; p <= CFG.maxCrew; p++) {
       const days = Math.ceil(hoursNeeded / (p * hoursPerDayPerPerson));
-      if (sqft > 900 && p < 4 && days > 2) { bestPeople = 4; bestDays = Math.ceil(hoursNeeded / (4 * hoursPerDayPerPerson)); break; }
-      if (sqft > 1500 && p < 5) { bestPeople = 5; bestDays = Math.ceil(hoursNeeded / (5 * hoursPerDayPerPerson)); break; }
+      if (inputs.sqft > 900 && p < 4 && days > 2) { bestPeople = 4; bestDays = Math.ceil(hoursNeeded / (4 * hoursPerDayPerPerson)); break; }
+      if (inputs.sqft > 1500 && p < 5) { bestPeople = 5; bestDays = Math.ceil(hoursNeeded / (5 * hoursPerDayPerPerson)); break; }
     }
   }
 
@@ -102,17 +108,80 @@ export function computeMaterials(inputs: CostInputs) {
   return { gallons, unitCost: CFG.gallonUnitCost, wastePct: CFG.wastePct, subtotal: round2(subtotal), consumablesSubtotal };
 }
 
+export function contextualMultipliers(opts: {
+  interior: boolean;
+  trim: 'low'|'medium'|'high';
+  heightFt?: number | null;
+  drywall: 'none'|'light'|'moderate'|'heavy';
+}) {
+  const { interior, trim, heightFt, drywall } = opts;
+
+  let prodMul = 1.0;
+  if (trim === 'medium') prodMul *= 0.92;
+  if (trim === 'high') prodMul *= 0.82;
+
+  if (typeof heightFt === 'number') {
+    if (heightFt >= 10 && heightFt < 12) prodMul *= 0.9;
+    else if (heightFt >= 12) prodMul *= 0.8;
+  }
+
+  if (!interior) prodMul *= 0.92;
+
+  let repairHoursPer100sqft = 0;
+  if (drywall === 'light') repairHoursPer100sqft = 0.25;
+  if (drywall === 'moderate') repairHoursPer100sqft = 0.6;
+  if (drywall === 'heavy') repairHoursPer100sqft = 1.1;
+
+  const consumablesBumpPct =
+    drywall === 'light' ? 0.05 :
+    drywall === 'moderate' ? 0.10 :
+    drywall === 'heavy' ? 0.18 : 0;
+
+  return { prodMul, repairHoursPer100sqft, consumablesBumpPct };
+}
+
 export function priceJob(inputs: CostInputs): CostOutputs {
-  const crew = planCrewAndHours(inputs);
+  // Contextual adjustments (optional)
+  const ctx = inputs.__ctx;
+  let prodAdjMul = 1.0;
+  let repairHours = 0;
+  let consumablesBumpPct = 0;
+
+  if (ctx) {
+    const mul = contextualMultipliers({
+      interior: ctx.interior,
+      trim: ctx.trim,
+      heightFt: ctx.heightFt,
+      drywall: ctx.drywall
+    });
+    prodAdjMul = mul.prodMul;
+    repairHours = (inputs.sqft / 100) * mul.repairHoursPer100sqft;
+    consumablesBumpPct = mul.consumablesBumpPct;
+  }
+
+  // Base crew → adjust hours and days by prodAdjMul + repair time
+  const crewBase = planCrewAndHours(inputs);
+  const adjHoursTotal = Math.ceil((crewBase.hoursTotal / prodAdjMul) + repairHours);
+  const hoursPerDay = CFG.hoursPerDay;
+  const adjDays = Math.max(crewBase.days, Math.ceil(adjHoursTotal / (crewBase.people * hoursPerDay)));
+
+  const crew = {
+    people: crewBase.people,
+    days: adjDays,
+    hoursTotal: round2(adjHoursTotal),
+    productivitySqftHr: crewBase.productivitySqftHr * prodAdjMul
+  };
+
   const mat = computeMaterials(inputs);
   const labor = crew.hoursTotal * CFG.laborRateHr;
 
-  const consumables = { subtotal: mat.consumablesSubtotal, notes: ['Tape/plastic/paper, filler/sand, rollers, tips'] };
+  const consumables = { subtotal: round2(mat.consumablesSubtotal * (1 + consumablesBumpPct)), notes: ['Tape/plastic/paper, filler/sand, rollers, tips'] };
   const mobilization = { trips: CFG.mobilizationsPerJob, perTrip: CFG.mobilizationPerTrip, subtotal: CFG.mobilizationsPerJob * CFG.mobilizationPerTrip };
   const miles = Math.max(0, inputs.distanceMiles ?? 0);
   const travel = { miles, $perMile: CFG.mileageRate, subtotal: round2(miles * CFG.mileageRate) };
 
   const baseBeforeOH = labor + mat.subtotal + consumables.subtotal + mobilization.subtotal + travel.subtotal;
+
   const overhead = { pct: CFG.overheadPct, subtotal: round2(baseBeforeOH * CFG.overheadPct) };
 
   const adjustments = {
