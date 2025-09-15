@@ -1,6 +1,8 @@
 import type { EstimateInputType } from './schema';
-import { estimateFromPhotos as heuristicV2 } from './estimator';
-import { priceJob } from './costing';
+import { estimateFromPhotos as wallsHeuristic } from './estimator';
+import { detectProjectType } from './detect_type';
+import { priceByType } from './costing_models';
+import { inferFeatures } from './features';
 
 type ProEstimate = {
   subtotal: number;
@@ -14,8 +16,9 @@ type ProEstimate = {
   sqft: number;
   notes: string[];
   crew: { people:number; days:number; hoursTotal:number; productivitySqftHr:number; };
-  materialsDetail: { gallons:number; unitCost:number; wastePct:number; };
+  materialsDetail?: { gallons:number; unitCost:number; wastePct:number; };
   lineItems: { label:string; amount:number; }[];
+  detected: { type: string; confidence: number; complexity: string };
 };
 
 export async function estimatePro(files: Buffer[], input: EstimateInputType & {
@@ -24,43 +27,56 @@ export async function estimatePro(files: Buffer[], input: EstimateInputType & {
   rush?: boolean;
   weekend?: boolean;
 }): Promise<ProEstimate> {
-  const base = await heuristicV2(files, input);
-  const sqft = base.sqft;
 
-  const priced = priceJob({
-    sqft,
+  const [detected, walls, feats] = await Promise.all([
+    detectProjectType(files),
+    wallsHeuristic(files, input),
+    inferFeatures(files)
+  ]);
+
+  const priced = priceByType(detected.type, {
+    filesCount: files.length,
+    inferredSqftFromWalls: detected.type === 'interior_walls' ? walls.sqft : undefined,
     coats: input.coats,
     finish: input.finish,
-    difficulty: base.difficulty,
+    difficulty: walls.difficulty,
     distanceMiles: input.distanceMiles ?? 0,
-    preferredDays: input.preferredDays,
     rush: input.rush,
-    weekend: input.weekend
+    weekend: input.weekend,
+    preferredDays: input.preferredDays,
+    complexity: detected.complexity,
+    __ctx: {
+      interior: feats.interior,
+      trim: feats.trimDensity,
+      heightFt: feats.estHeightFt ?? undefined,
+      drywall: feats.drywallRepair
+    }
   });
 
-  const diffAdj = base.difficulty === 'high' ? 0.12 : base.difficulty === 'medium' ? 0.08 : 0.05;
-  const low = Math.round(priced.total * (1 - diffAdj) * 100) / 100;
-  const high = Math.round(priced.total * (1 + diffAdj) * 100) / 100;
+  const typeUnc = detected.type === 'interior_walls' ? 0.10 : detected.type === 'custom_shoes' ? 0.20 : 0.18;
+  const diffAdj = walls.difficulty === 'high' ? 0.06 : walls.difficulty === 'medium' ? 0.04 : 0.02;
+  const unc = Math.min(0.35, typeUnc + diffAdj);
+  const low = round2(priced.total * (1 - unc));
+  const high = round2(priced.total * (1 + unc));
 
   const lineItems = [
     { label: 'Labor (crew time)', amount: priced.baseLabor },
-    { label: 'Materials (paint)', amount: priced.materials.subtotal },
+    { label: 'Materials', amount: priced.materials.subtotal },
     { label: 'Consumables', amount: priced.consumables.subtotal },
     { label: 'Mobilization', amount: priced.mobilization.subtotal },
     { label: 'Travel', amount: priced.travel.subtotal },
     { label: `Overhead (${Math.round(priced.overhead.pct*100)}%)`, amount: priced.overhead.subtotal },
-    { label: `Premiums (rush/weekend/seasonal + equipment)`, amount:
-      Math.round((priced.subtotal - priced.baseLabor - priced.materials.subtotal - priced.consumables.subtotal - priced.mobilization.subtotal - priced.travel.subtotal - priced.overhead.subtotal)*100)/100
-    },
-    { label: `Margin (${Math.round(priced.margin.pct*100)}%)`, amount: priced.margin.subtotal }
+    { label: `Margin (${Math.round(priced.margin.pct*100)}%)`, amount: priced.margin.subtotal },
   ];
 
   const notes = [
-    ...base.notes,
-    `Crew plan: ${priced.crew.people} painters × ${priced.crew.days} day(s) (~${priced.crew.hoursTotal} labor-hours).`,
-    `Budgeted materials: ${priced.materials.gallons} gal @ $${priced.materials.unitCost}/gal (includes ${Math.round(priced.materials.wastePct*100)}% waste).`,
-    priced.adjustments.rushPct ? `Rush premium applied: ${Math.round(priced.adjustments.rushPct*100)}%.` : '',
-    priced.adjustments.weekendPct ? `Weekend premium applied: ${Math.round(priced.adjustments.weekendPct*100)}%.` : '',
+    `Detected project: ${detected.type.replace('_',' ')} (conf ${Math.round(detected.confidence*100)}%).`,
+    feats.interior ? 'Interior' : 'Exterior',
+    `Trim: ${feats.trimDensity}`,
+    feats.estHeightFt ? `Estimated height ≈ ${feats.estHeightFt} ft` : '',
+    `Drywall repair: ${feats.drywallRepair}`,
+    ...(detected.type === 'interior_walls' ? walls.notes : []),
+    detected.type !== 'interior_walls' ? 'Scope from photo count; verified on walkthrough.' : ''
   ].filter(Boolean);
 
   return {
@@ -70,12 +86,21 @@ export async function estimatePro(files: Buffer[], input: EstimateInputType & {
     rangeHigh: high,
     labor: priced.baseLabor,
     materials: priced.materials.subtotal,
-    prep: Math.round((priced.overhead.subtotal)*100)/100,
-    difficulty: base.difficulty,
-    sqft,
+    prep: priced.overhead.subtotal,
+    difficulty: walls.difficulty,
+    sqft: detected.type === 'interior_walls' ? walls.sqft : Math.round(estimatePseudoSqft(detected.type, files.length)),
     notes,
     crew: priced.crew,
-    materialsDetail: { gallons: priced.materials.gallons, unitCost: priced.materials.unitCost, wastePct: priced.materials.wastePct },
-    lineItems
+    materialsDetail: (priced as any).materials ? { gallons: (priced as any).materials.gallons, unitCost: (priced as any).materials.unitCost, wastePct: (priced as any).materials.wastePct } : undefined,
+    lineItems,
+    detected: { type: detected.type, confidence: detected.confidence, complexity: detected.complexity }
   };
 }
+
+function estimatePseudoSqft(type: string, photos: number) {
+  if (type === 'fence') return photos * 18 * 6;
+  if (type === 'deck') return photos * 40;
+  if (type === 'custom_shoes') return 6;
+  return photos * 90;
+}
+function round2(n:number){ return Math.round(n*100)/100; }
