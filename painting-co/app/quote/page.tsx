@@ -36,17 +36,8 @@ export default function QuotePage() {
     try {
       const fd = new FormData();
       files.forEach((f) => fd.append('photos', f));
-
-      const res = await fetch('/api/estimate', {
-        method: 'POST',
-        body: fd,
-      });
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(text || `Request failed (${res.status})`);
-      }
-
+      const res = await fetch('/api/estimate', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(await res.text().catch(() => `Request failed (${res.status})`));
       const data: EstimateResponse = await res.json();
       setResponse(data);
     } catch (e: any) {
@@ -58,7 +49,7 @@ export default function QuotePage() {
 
   return (
     <>
-      {/* Left column (uploader) on desktop, stacked first on mobile */}
+      {/* Uploader panel */}
       <section className="card">
         <h1 style={{ margin: '0 0 4px' }}>Smart Photo Quote</h1>
         <p style={{ color: 'var(--muted)', marginTop: 4, fontSize: 14 }}>
@@ -68,7 +59,7 @@ export default function QuotePage() {
         <UploadDropzone onSubmit={onSubmit} />
 
         {thumbs.length > 0 && (
-          <div className="thumb-grid">
+          <div className="thumb-grid" style={{ marginTop: 12 }}>
             {thumbs.map((src, i) => (
               <div key={i} className="thumb">
                 <img src={src} alt={`photo ${i + 1}`} />
@@ -78,13 +69,13 @@ export default function QuotePage() {
         )}
       </section>
 
-      {/* Right column (results) on desktop, stacked second on mobile */}
+      {/* Result panel */}
       <section className="result">
         {loading && (
           <div style={{ display: 'grid', gap: 8 }}>
-            <div className="skeleton" style={{ height: 24 }}></div>
-            <div className="skeleton"></div>
-            <div className="skeleton" style={{ width: '70%' }}></div>
+            <div className="skeleton" style={{ height: 24 }} />
+            <div className="skeleton" />
+            <div className="skeleton" style={{ width: '70%' }} />
           </div>
         )}
 
