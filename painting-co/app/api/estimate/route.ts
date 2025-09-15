@@ -1,57 +1,41 @@
+// app/api/estimate/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import formidable from 'formidable';
 import { estimateFromPhotos } from '@lib/estimator';
 import { EstimateInput } from '@lib/schema';
 
-export const runtime = 'nodejs'; // required for sharp/formidable
+export const runtime = 'nodejs';       // required for sharp
 export const dynamic = 'force-dynamic';
-
-async function parseForm(req: NextRequest) {
-  const contentType = req.headers.get('content-type') || '';
-  if (!contentType.includes('multipart/form-data')) {
-    return NextResponse.json({ error: 'Expected multipart/form-data' }, { status: 400 });
-  }
-
-  const buffers: Buffer[] = [];
-  const fields: Record<string, any> = {};
-
-  // formidable needs a Node stream; NextRequest is web stream. Convert via arrayBuffer.
-  const ab = await req.arrayBuffer();
-  const form = formidable({ multiples: true, maxFiles: 5, maxFileSize: 10 * 1024 * 1024 });
-  const [fieldsOut, filesOut] = await new Promise<[Record<string,any>, formidable.Files]>((resolve, reject) => {
-    form.parse(Buffer.from(ab) as any, (err, flds, fls) => {
-      if (err) reject(err);
-      else resolve([flds, fls]);
-    });
-  }).catch((e)=>{ throw new Error('Upload parse failed: '+e.message); });
-
-  Object.assign(fields, fieldsOut);
-
-  const photos = filesOut['photos'];
-  const list = Array.isArray(photos) ? photos : photos ? [photos] : [];
-  for (const file of list) {
-    // @ts-ignore
-    const data: Buffer = file._writeStream?.buffer || file.toJSON?.().buffer;
-    if (!data) throw new Error('Could not read file buffer');
-    buffers.push(Buffer.from(data));
-  }
-
-  return { fields, buffers };
-}
 
 export async function POST(req: NextRequest) {
   try {
-    const { fields, buffers } = await parseForm(req);
-    if (buffers.length === 0) return NextResponse.json({ error: 'No photos uploaded' }, { status: 400 });
+    // Parse multipart without formidable
+    const fd = await req.formData();
 
-    const parsed = EstimateInput.safeParse({
-      heightFt: fields.heightFt, coats: fields.coats, finish: fields.finish
-    });
-    if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+    const blobs = fd.getAll('photos') as unknown as Blob[];
+    if (!blobs || blobs.length === 0) {
+      return NextResponse.json({ error: 'No photos uploaded' }, { status: 400 });
+    }
+
+    // Gather fields
+    const heightFt = fd.get('heightFt');
+    const coats = fd.get('coats');
+    const finish = fd.get('finish');
+
+    const parsed = EstimateInput.safeParse({ heightFt, coats, finish });
+    if (!parsed.success) {
+      return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+    }
+
+    // Convert Blobs to Buffers for sharp
+    const buffers: Buffer[] = [];
+    for (const b of blobs) {
+      const ab = await (b as Blob).arrayBuffer();
+      buffers.push(Buffer.from(ab));
+    }
 
     const result = await estimateFromPhotos(buffers, parsed.data);
     return NextResponse.json(result);
-  } catch (e:any) {
+  } catch (e: any) {
     return NextResponse.json({ error: e.message || 'Failed to estimate' }, { status: 500 });
   }
 }
