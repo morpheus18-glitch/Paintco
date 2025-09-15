@@ -1,90 +1,46 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { EstimateInput } from '@lib/schema';
-import { estimateFromPhotos as heuristicV2 } from '@lib/estimator';
-import { estimatePro } from '@lib/estimator_pro';
-
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-
-const USE_PRO = process.env.USE_PRO_ESTIMATOR === '1';
-
-function daysUntil(dateStr?: string | null) {
-  if (!dateStr) return undefined;
-  const target = new Date(String(dateStr));
-  if (Number.isNaN(target.getTime())) return undefined;
-  const now = new Date();
-  return Math.ceil((target.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-}
-
-export async function POST(req: NextRequest) {
-  try {
-    const fd = await req.formData();
-
-    const blobs = fd.getAll('photos') as unknown as Blob[];
-    if (!blobs || blobs.length === 0) {
-      return NextResponse.json({ error: 'No photos uploaded' }, { status: 400 });
-    }
-
-    // ✅ Defaults so the client can send ONLY photos
-    const heightFtRaw = fd.get('heightFt') ?? '9';
-    const coatsRaw = fd.get('coats') ?? '2';
-    const finishRaw = (fd.get('finish') as string) ?? 'eggshell';
-
-    const parsed = EstimateInput.safeParse({
-      heightFt: heightFtRaw,
-      coats: coatsRaw,
-      finish: finishRaw
-    });
-    if (!parsed.success) {
-      return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
-    }
-
-    // Optional fields (unused in “no input” flow; safe defaults)
-    const distanceMiles = Number(fd.get('distanceMiles') || 0);
-    const preferredDays = Number(fd.get('preferredDays') || 0) || undefined;
-    const rushToggle = String(fd.get('rush') || '') === 'true';
-    const weekend = String(fd.get('weekend') || '') === 'true';
-
-    // Optional deadline → automatic rush bump
-    const deadlineStr = String(fd.get('deadline') || '') || undefined;
-    const daysLeft = daysUntil(deadlineStr);
-    const deadlineRush =
-      typeof daysLeft === 'number' ? (daysLeft <= 3 ? 0.30 : daysLeft <= 7 ? 0.20 : 0) : 0;
-
-    // Convert blobs to buffers
-    const buffers: Buffer[] = [];
-    for (const b of blobs) buffers.push(Buffer.from(await (b as Blob).arrayBuffer()));
-
-    if (USE_PRO) {
-      const result = await estimatePro(buffers, {
-        ...parsed.data,
-        distanceMiles,
-        preferredDays,
-        rush: rushToggle || deadlineRush > 0,
-        weekend
-      });
-
-      if (deadlineRush > 0) {
-        const mult = 1 + deadlineRush;
-        result.rangeLow = +(result.rangeLow * mult).toFixed(2);
-        result.rangeHigh = +(result.rangeHigh * mult).toFixed(2);
-        (result as any).total = +(((result as any).total ?? result.subtotal) * mult).toFixed(2);
-        result.notes.push(`Deadline premium applied: +${Math.round(deadlineRush * 100)}% based on date needed.`);
-      }
-
-      return NextResponse.json(result);
-    } else {
-      const result = await heuristicV2(buffers, parsed.data);
-      if (rushToggle || deadlineRush > 0) {
-        const mult = 1 + (rushToggle ? 0.07 : 0) + deadlineRush;
-        result.subtotal = +(result.subtotal * mult).toFixed(2);
-        result.rangeLow = +(result.rangeLow * mult).toFixed(2);
-        result.rangeHigh = +(result.rangeHigh * mult).toFixed(2);
-        result.notes.push(`Rush/deadline premium applied.`);
-      }
-      return NextResponse.json(result);
-    }
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message || 'Failed to estimate' }, { status: 500 });
+export default function EstimateResult({ data }:{
+  data: {
+    subtotal:number; total?:number; rangeLow:number; rangeHigh:number;
+    labor:number; materials:number; prep:number;
+    difficulty:'low'|'medium'|'high'; sqft:number; notes:string[];
+    crew?: { people:number; days:number; hoursTotal:number; productivitySqftHr:number; };
+    materialsDetail?: { gallons:number; unitCost:number; wastePct:number; };
+    lineItems?: { label:string; amount:number; }[];
   }
+}) {
+  const fmt = (n:number)=> `$${n.toFixed(2)}`;
+  return (
+    <div>
+      <h2 style={{marginTop:0}}>Ballpark Estimate</h2>
+      <p style={{marginTop:-8, color:'#a7b0d6'}}>Not a final quote — on-site walkthrough will confirm.</p>
+
+      <div className="grid" style={{gridTemplateColumns:'1fr 1fr', gap:16}}>
+        <div className="card">
+          <h3>Totals</h3>
+          <p>Estimated Area: <strong>{Math.round(data.sqft)} sq ft</strong></p>
+          <p>Difficulty: <strong>{data.difficulty}</strong></p>
+          {data.crew && <p>Crew Plan: <strong>{data.crew.people} painters × {data.crew.days} day(s)</strong> (~{data.crew.hoursTotal} hrs)</p>}
+          <p>Labor: <strong>{fmt(data.labor)}</strong></p>
+          <p>Materials: <strong>{fmt(data.materials)}</strong>
+            {data.materialsDetail && <> &nbsp;<small style={{color:'#a7b0d6'}}>({data.materialsDetail.gallons} gal @ ${data.materialsDetail.unitCost}/gal)</small></>}
+          </p>
+          <p>Ops/Overhead: <strong>{fmt(data.prep)}</strong></p>
+          <hr/>
+          <p style={{fontSize:18, marginBottom:6}}>Suggested Price: <strong>{fmt((data as any).total ?? data.subtotal)}</strong></p>
+          <p style={{fontSize:13, color:'#a7b0d6', marginTop:0}}>
+            Confidence band: <strong>{fmt(data.rangeLow)}</strong> – <strong>{fmt(data.rangeHigh)}</strong>
+          </p>
+        </div>
+
+        <div className="card">
+          <h3>Line Items</h3>
+          <ul>
+            {(data.lineItems ?? []).map((li,i)=><li key={i} style={{display:'flex', justifyContent:'space-between'}}><span>{li.label}</span><strong>{fmt(li.amount)}</strong></li>)}
+          </ul>
+          <h3 style={{marginTop:16}}>Notes & Assumptions</h3>
+          <ul>{data.notes.map((n,i)=><li key={i}>{n}</li>)}</ul>
+        </div>
+      </div>
+    </div>
+  );
 }
