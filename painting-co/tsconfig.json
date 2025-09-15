@@ -11,6 +11,8 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "incremental": true,
+
+    "baseUrl": ".",
     "paths": {
       "@components/*": ["./components/*"],
       "@lib/*": ["./lib/*"]
